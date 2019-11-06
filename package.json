@@ -39,7 +39,7 @@
     "du": "^1.0.0",
     "electron": "^7.0.1",
     "faucet": "^0.0.1",
-    "glob": "^7.1.3",
+    "glob": "^7.1.6",
     "hallmark": "^2.0.0",
     "level-community": "^3.0.0",
     "level-concat-iterator": "^2.0.0",
