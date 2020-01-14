@@ -2,7 +2,7 @@
   "targets": [{
     "target_name": "leveldb",
     "variables": {
-      "ldbversion": "1.20"
+      "ldbversion": "mcpe"
     },
     "type": "static_library",
     "standalone_static_library": 1,
@@ -18,11 +18,13 @@
       ]
     },
     "defines": [
-      "SNAPPY=1"
+      "SNAPPY=1",
+      "DLLX"
     ],
     "include_dirs": [
       "leveldb-<(ldbversion)/",
-      "leveldb-<(ldbversion)/include/"
+      "leveldb-<(ldbversion)/include/",
+      "../snappy"
     ],
     "conditions": [
       ["OS == 'win'", {
@@ -79,7 +81,8 @@
           "OS_LINUX=1"
         ],
         "libraries": [
-          "-lpthread"
+          "-lpthread",
+          "-lz"
         ],
         "ccflags": [
           "-pthread"
@@ -144,7 +147,8 @@
       }],
       ["OS == 'mac'", {
         "defines": [
-          "OS_MACOSX=1"
+          "OS_MACOSX=1",
+          "DLLX",
         ],
         "libraries": [],
         "ccflags": [],
@@ -207,6 +211,7 @@
       "leveldb-<(ldbversion)/db/repair.cc",
       "leveldb-<(ldbversion)/db/skiplist.h",
       "leveldb-<(ldbversion)/db/snapshot.h",
+      "leveldb-<(ldbversion)/db/snappy_compressor.cc",
       "leveldb-<(ldbversion)/db/table_cache.cc",
       "leveldb-<(ldbversion)/db/table_cache.h",
       "leveldb-<(ldbversion)/db/version_edit.cc",
@@ -215,6 +220,7 @@
       "leveldb-<(ldbversion)/db/version_set.h",
       "leveldb-<(ldbversion)/db/write_batch.cc",
       "leveldb-<(ldbversion)/db/write_batch_internal.h",
+      "leveldb-<(ldbversion)/db/zlib_compressor.cc",
       "leveldb-<(ldbversion)/helpers/memenv/memenv.cc",
       "leveldb-<(ldbversion)/helpers/memenv/memenv.h",
       "leveldb-<(ldbversion)/include/leveldb/cache.h",

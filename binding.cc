@@ -8,7 +8,8 @@
 #include <leveldb/write_batch.h>
 #include <leveldb/cache.h>
 #include <leveldb/filter_policy.h>
-
+#include <leveldb/zlib_compressor.h>
+#include <leveldb/snappy_compressor.h>
 #include <map>
 #include <vector>
 
@@ -17,6 +18,7 @@
  */
 struct Database;
 struct Iterator;
+struct EndWorker;
 static void iterator_end_do (napi_env env, Iterator* iterator, napi_value cb);
 
 /**
@@ -574,15 +576,6 @@ struct Iterator {
     database_->ReleaseSnapshot(options_->snapshot);
   }
 
-  void CheckEndCallback () {
-    nexting_ = false;
-
-    if (endWorker_ != NULL) {
-      endWorker_->Queue();
-      endWorker_ = NULL;
-    }
-  }
-
   bool GetIterator () {
     if (dbIterator_ != NULL) return false;
 
@@ -595,24 +588,27 @@ struct Iterator {
         if (!dbIterator_->Valid()) {
           dbIterator_->SeekToLast();
         } else {
-          leveldb::Slice key = dbIterator_->key();
+          std::string keyStr = dbIterator_->key().ToString();
 
-          if ((lt_ != NULL && key.compare(*lt_) >= 0) ||
-              (lte_ != NULL && key.compare(*lte_) > 0) ||
-              (start_ != NULL && key.compare(*start_) > 0)) {
-            dbIterator_->Prev();
+          if (lt_ != NULL) {
+            if (lt_->compare(keyStr) <= 0)
+              dbIterator_->Prev();
+          } else if (lte_ != NULL) {
+            if (lte_->compare(keyStr) < 0)
+              dbIterator_->Prev();
+          } else if (start_ != NULL) {
+            if (start_->compare(keyStr))
+              dbIterator_->Prev();
           }
         }
 
-        // TODO: this looks like dead code. Remove it in a
-        // next major release together with Level/community#86.
         if (dbIterator_->Valid() && lt_ != NULL) {
-          if (dbIterator_->key().compare(*lt_) >= 0)
+          if (lt_->compare(dbIterator_->key().ToString()) <= 0)
             dbIterator_->Prev();
         }
       } else {
         if (dbIterator_->Valid() && gt_ != NULL
-            && dbIterator_->key().compare(*gt_) == 0)
+            && gt_->compare(dbIterator_->key().ToString()) == 0)
           dbIterator_->Next();
       }
     } else if (reverse_) {
@@ -732,7 +728,7 @@ struct Iterator {
   bool ended_;
 
   leveldb::ReadOptions* options_;
-  BaseWorker* endWorker_;
+  EndWorker* endWorker_;
 
 private:
   napi_ref ref_;
@@ -773,9 +769,9 @@ struct OpenWorker final : public BaseWorker {
     options_.filter_policy = database->filterPolicy_;
     options_.create_if_missing = createIfMissing;
     options_.error_if_exists = errorIfExists;
-    options_.compression = compression
-      ? leveldb::kSnappyCompression
-      : leveldb::kNoCompression;
+    options_.compressors[0] = (compression ? new leveldb::ZlibCompressorRaw() : nullptr);
+    options_.compressors[1] = (compression ? new leveldb::ZlibCompressor() : nullptr);
+    options_.compressors[1] = (compression ? new leveldb::SnappyCompressor() : nullptr);
     options_.write_buffer_size = writeBufferSize;
     options_.block_size = blockSize;
     options_.max_open_files = maxOpenFiles;
@@ -804,7 +800,7 @@ NAPI_METHOD(db_open) {
   napi_value options = argv[2];
   bool createIfMissing = BooleanProperty(env, options, "createIfMissing", true);
   bool errorIfExists = BooleanProperty(env, options, "errorIfExists", false);
-  bool compression = BooleanProperty(env, options, "compression", true);
+  bool compressor = BooleanProperty(env, options, "compression", true);
 
   uint32_t cacheSize = Uint32Property(env, options, "cacheSize", 8 << 20);
   uint32_t writeBufferSize = Uint32Property(env, options , "writeBufferSize" , 4 << 20);
@@ -819,7 +815,7 @@ NAPI_METHOD(db_open) {
   napi_value callback = argv[3];
   OpenWorker* worker = new OpenWorker(env, database, callback, location,
                                       createIfMissing, errorIfExists,
-                                      compression, writeBufferSize, blockSize,
+                                      compressor, writeBufferSize, blockSize,
                                       maxOpenFiles, blockRestartInterval,
                                       maxFileSize);
   worker->Queue();
@@ -1311,7 +1307,8 @@ NAPI_METHOD(iterator_seek) {
       dbIterator->SeekToLast();
       dbIterator->Next();
     }
-  } else if (dbIterator->Valid()) {
+  }
+  else if (dbIterator->Valid()) {
     int cmp = dbIterator->key().compare(target);
     if (cmp > 0 && iterator->reverse_) {
       dbIterator->Prev();
@@ -1394,15 +1391,29 @@ NAPI_METHOD(iterator_end) {
 }
 
 /**
+ * TODO Move this to Iterator. There isn't any reason
+ * for this function being a separate function pointer.
+ */
+void CheckEndCallback (Iterator* iterator) {
+  iterator->nexting_ = false;
+  if (iterator->endWorker_ != NULL) {
+    iterator->endWorker_->Queue();
+    iterator->endWorker_ = NULL;
+  }
+}
+
+/**
  * Worker class for nexting an iterator.
  */
 struct NextWorker final : public BaseWorker {
   NextWorker (napi_env env,
               Iterator* iterator,
-              napi_value callback)
+              napi_value callback,
+              void (*localCallback)(Iterator*))
     : BaseWorker(env, iterator->database_, callback,
                  "leveldown.iterator.next"),
-      iterator_(iterator) {}
+      iterator_(iterator),
+      localCallback_(localCallback) {}
 
   ~NextWorker () {}
 
@@ -1443,7 +1454,8 @@ struct NextWorker final : public BaseWorker {
     }
 
     // clean up & handle the next/end state
-    iterator_->CheckEndCallback();
+    // TODO this should just do iterator_->CheckEndCallback();
+    localCallback_(iterator_);
 
     napi_value argv[3];
     napi_get_null(env_, &argv[0]);
@@ -1455,6 +1467,8 @@ struct NextWorker final : public BaseWorker {
   }
 
   Iterator* iterator_;
+  // TODO why do we need a function pointer for this?
+  void (*localCallback_)(Iterator*);
   std::vector<std::pair<std::string, std::string> > result_;
   bool ok_;
 };
@@ -1475,7 +1489,8 @@ NAPI_METHOD(iterator_next) {
     NAPI_RETURN_UNDEFINED();
   }
 
-  NextWorker* worker = new NextWorker(env, iterator, callback);
+  NextWorker* worker = new NextWorker(env, iterator, callback,
+                                      CheckEndCallback);
   iterator->nexting_ = true;
   worker->Queue();
 
